@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstring>
 #include <future>
 #include <string>
@@ -19,40 +20,31 @@ string read_file(const string &filename) {
     return buffer.str();
 }
 
-// flip lower to upper and vice versa
-char flip_case(const char &c) {
-    if (isupper(c)) return tolower(c);
-    return toupper(c);
-}
-
-// find the first occurence of substr in str within str[left, right], both inclusive
-int find_substr(const string &str, const string &substr, const unsigned &left, const unsigned &right,
-                const bool case_insensitive = false) {
+// find the first occurrence of substr in str within str[left, right], both inclusive
+int find_substr(const string &str, const string &pattern, const string &pattern_flip,
+                const unsigned &left, const unsigned &right) {
     if (left > right) return -1;
 
     // load values before hand
-    const unsigned substr_size = substr.size(), str_size = str.size();
+    const unsigned substr_size = pattern.size(), str_size = str.size();
     if (str_size == 0 or substr_size == 0) return -1;
 
-    // if case_insensitive, load lower and upper, else both are same
-    const char first_sub_char1 = substr[0];
-    const char first_sub_char2 = case_insensitive ? flip_case(first_sub_char1) : first_sub_char1;
+    // optimization, load first character
+    const char first_sub_char = pattern[0];
+    const char first_sub_char_flip = pattern_flip[0];
 
     // find the substr starting from i in str
+    // check pattern and pattern_flip (for case insensitive search)
     for (unsigned i = left; i <= right; i++) {
-        // optimization, check upper and lower case match
-        if (str[i] != first_sub_char1 && str[i] != first_sub_char2) continue;
+        // use optimization, check first character match before initializing loops etc
+        if (str[i] != first_sub_char && str[i] != first_sub_char_flip) continue;
 
         // if not a match, go to next i
         bool match = true;
         // check proceeding characters
         for (unsigned j = 1; j < substr_size; j++) {
-            // if case_insensitive, load lower and upper, else both are same
-            const char sub_char1 = substr[j];
-            const char sub_char2 = case_insensitive ? flip_case(sub_char1) : sub_char1;
-
-            // check upper and lower case match
-            if (i + j < str_size && str[i + j] != sub_char1 && str[i + j] != sub_char2) {
+            // check match, if case_insensitive, check lower and upper, else both are same
+            if (i + j < str_size && str[i + j] != pattern[j] && str[i + j] != pattern_flip[j]) {
                 match = false;
                 break;
             }
@@ -62,20 +54,19 @@ int find_substr(const string &str, const string &substr, const unsigned &left, c
     return -1;
 }
 
-vector<unsigned> exact_search(const string &str, const string &pattern, const unsigned left, const unsigned right,
-                              bool case_insensitive = false) {
+vector<unsigned> exact_search(const string &str, const string &pattern, const string &pattern_flip,
+                              const unsigned left, const unsigned right) {
     if (left > right or str.empty() or pattern.empty()) return {};
-    // edge case, left should never equal right anyway
-    if (left == right && pattern.size() == 1 and str[left] == pattern[0]) return {left};
 
     // since there is a lot of overhead to make new threads,
     // use single thread for small strings
     if (right - left >= 1'000'000) {
         const unsigned mid = (left + right) / 2;
-        // search left and right halves
-        auto future_left = async(launch::async, exact_search, ref(str), ref(pattern), left, mid, case_insensitive);
-        auto future_right = async(launch::async, exact_search, ref(str), ref(pattern), mid + 1, right,
-                                  case_insensitive);
+        // search left and right halves parellely using only software threads
+        auto future_left = async(launch::deferred, exact_search, ref(str),
+                                 ref(pattern), ref(pattern_flip), left, mid);
+        auto future_right = async(launch::deferred, exact_search, ref(str),
+                                  ref(pattern), ref(pattern_flip), mid + 1, right);
         vector<unsigned> left_indices = future_left.get();
         vector<unsigned> right_indices = future_right.get();
         left_indices.insert(left_indices.end(), right_indices.begin(), right_indices.end());
@@ -83,15 +74,17 @@ vector<unsigned> exact_search(const string &str, const string &pattern, const un
     }
 
     vector<unsigned> indices;
+    // reserve a few indices
+    indices.reserve(64);
     while (true) {
         int ind;
         // use str.find for in built find, is faster, but doesn't support case_insensitive
         if (!indices.empty())
             // ind = str.find(pattern, indices.back() + 1);
-            ind = find_substr(str, pattern, indices.back() + 1, right, case_insensitive);
+            ind = find_substr(str, pattern, pattern_flip, indices.back() + 1, right);
         else
             // ind = str.find(pattern, left);
-            ind = find_substr(str, pattern, left, right, case_insensitive);
+            ind = find_substr(str, pattern, pattern_flip, left, right);
         if (ind == -1 or ind > right) break;
         indices.push_back(ind);
     }
@@ -133,11 +126,21 @@ int main(const int argc, char *argv[]) {
     }
 
     const string str = read_file(argv[1]);
-    const string pattern = argv[2];
+    string pattern = argv[2];
+    string pattern_flip;
+
+    // if case_insensitive, have 2 patterns, with lower and upper only respectively
+    // search for pattern in an OR fashion, either lower or upper character should be present
+    if (case_insensitive) {
+        transform(pattern.begin(), pattern.end(), pattern.begin(), ::tolower);
+        transform(pattern.begin(), pattern.end(), pattern_flip.begin(), ::toupper);
+    } else {
+        pattern_flip = pattern;
+    }
 
     // time the function
     const auto start = chrono::steady_clock::now();
-    const vector<unsigned> indices = exact_search(str, pattern, 0, str.size() - 1, case_insensitive);
+    const vector<unsigned> indices = exact_search(str, pattern, pattern_flip, 0, str.size() - 1);
     const auto end = chrono::steady_clock::now();
 
     // highlight results in green
